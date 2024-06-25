@@ -1,0 +1,94 @@
+name: Build and Deploy to Azure
+
+env:
+  AZURE_CONTAINER_REGISTRY_NAME: "githubactiondemo0624"
+  AZURE_CONTAINER_REGISTRY: "githubactiondemo0624.azurecr.io"
+  CONTAINER_NAME: "hello-world"
+  RESOURCE_GROUP: "Gitactiondemo0624"
+  CLUSTER_NAME: "charls-aks-demo-cluster"
+  DEPLOYMENT_MANIFEST_PATH: "kubernetes"
+
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  buildImage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+        
+      - name: Azure Container Registry Login
+        uses: Azure/docker-login@v1
+        with:
+          username: ${{ env.AZURE_CONTAINER_REGISTRY_NAME }}
+          password: ${{ secrets.AZURE_CONTAINER_REGISTRY_PASSWORD }}
+          login-server: ${{ env.AZURE_CONTAINER_REGISTRY }}
+
+      - name: Build and push container image to registry
+        uses: docker/build-push-action@v2
+        with:
+          push: true
+          tags: ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.CONTAINER_NAME }}:${{ github.sha }}
+          file: ./Dockerfile
+    
+  deploy:
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    runs-on: ubuntu-latest
+    environment: Production
+    needs: [buildImage]
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Azure login
+        uses: azure/login@v1.4.6
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up kubelogin for non-interactive login
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: 'v0.0.25'
+
+      - name: Get K8s context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ env.RESOURCE_GROUP }}
+          cluster-name: ${{ env.CLUSTER_NAME }}
+          admin: 'false'
+          use-kubelogin: 'true'
+
+      - name: envsubst-action
+        uses: danielr1996/envsubst-action@1.1.0
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          AZURE_CONTAINER_REGISTRY_NAME: ${{ env.AZURE_CONTAINER_REGISTRY_NAME }}
+          AZURE_CONTAINER_REGISTRY: ${{ env.AZURE_CONTAINER_REGISTRY }}
+        with:
+          input: ${{ env.DEPLOYMENT_MANIFEST_PATH }}/hello-world-deployment.yaml
+          output: hello-world-deployment.yaml
+
+      - name: Deploys application
+        uses: Azure/k8s-deploy@v4
+        with:
+          action: deploy
+          manifests: |
+            hello-world-deployment.yaml
+            ${{ env.DEPLOYMENT_MANIFEST_PATH }}/hello-world-service.yaml
+          images: |
+            ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.CONTAINER_NAME }}:${{ github.sha }}
